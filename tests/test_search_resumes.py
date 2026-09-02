@@ -26,6 +26,11 @@ FROM RCW_RC_Voodoo_Jobseeker.JobSeekerResume AS r
 WHERE r.DelFlag = 0
   AND r.ResumeState = 2
   AND r.ResumeGuid IS NOT NULL
+QUALIFY row_number() OVER
+(
+    PARTITION BY r.ResumeGuid
+    ORDER BY r.LastRefreshDate DESC, r.LastEditTime DESC, r.ResumeID DESC
+) = 1
 ORDER BY r.LastRefreshDate DESC, r.LastEditTime DESC
 LIMIT {limit:UInt32}
 """.strip()
@@ -38,6 +43,11 @@ def run_cli(request=None, config=None, *extra_args):
     args.extend(extra_args)
     payload = "" if request is None else json.dumps(request, ensure_ascii=False)
     return subprocess.run(args, input=payload, capture_output=True, text=True, check=False)
+
+
+def write_private_config(path, value, mode=0o600):
+    path.write_text(json.dumps(value), encoding="utf-8")
+    path.chmod(mode)
 
 
 class FakeClickHouseHandler(BaseHTTPRequestHandler):
@@ -97,6 +107,15 @@ class ExecutorCliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["requested_limit"], 237)
 
+    def test_rejects_limit_larger_than_uint32(self):
+        result = run_cli(
+            {"sql": VALID_SQL, "params": {}, "limit": 2**32},
+            None,
+            "--validate-only",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(json.loads(result.stderr)["code"], "INVALID_REQUEST")
+
     def test_reference_summary_template_passes_executor_validation(self):
         reference = SCHEMA.read_text(encoding="utf-8")
         match = re.search(
@@ -135,6 +154,12 @@ class ExecutorCliTests(unittest.TestCase):
         skill = SKILL.read_text(encoding="utf-8")
         self.assertIn("intact substring", skill.lower())
 
+    def test_skill_documents_executor_structure_constraints(self):
+        skill = SKILL.read_text(encoding="utf-8")
+        self.assertIn("after the mandatory predicates", skill.lower())
+        self.assertIn("sql comments", skill.lower())
+        self.assertIn("4294967295", skill)
+
     def test_reference_summary_deduplicates_resume_guid_in_sql(self):
         reference = SCHEMA.read_text(encoding="utf-8")
         self.assertRegex(
@@ -168,9 +193,101 @@ class ExecutorCliTests(unittest.TestCase):
             VALID_SQL.replace("r.DelFlag = 0", "1 = 1"),
             VALID_SQL.replace("r.ResumeState = 2", "1 = 1"),
             VALID_SQL.replace("r.ResumeGuid IS NOT NULL", "1 = 1"),
+            re.sub(r"QUALIFY row_number\(\).*?\) = 1\n", "", VALID_SQL, flags=re.DOTALL),
         )
         for sql in cases:
             with self.subTest(sql=sql[:80]):
+                result = run_cli(
+                    {"sql": sql, "params": {}},
+                    None,
+                    "--validate-only",
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(json.loads(result.stderr)["code"], "INVALID_SQL")
+
+    def test_rejects_union_outer_alias_and_top_level_or_bypasses(self):
+        select_list = """SELECT
+    toString(r.ResumeGuid) AS ResumeGuid,
+    r.ResumeID,
+    r.JobSeekerID,
+    r.JobSeekerName
+FROM RCW_RC_Voodoo_Jobseeker.JobSeekerResume AS r"""
+        union_bypass = VALID_SQL.rsplit("ORDER BY", 1)[0] + f"""UNION ALL
+{select_list}
+WHERE 1 = 1
+LIMIT {{limit:UInt32}}"""
+        outer_alias_bypass = f"""WITH safe AS
+(
+    {select_list}
+    WHERE r.DelFlag = 0
+      AND r.ResumeState = 2
+      AND r.ResumeGuid IS NOT NULL
+)
+SELECT
+    toString(exposed.ResumeGuid) AS ResumeGuid
+FROM RCW_RC_Voodoo_Jobseeker.JobSeekerResume AS exposed
+WHERE 1 = 1
+LIMIT {{limit:UInt32}}"""
+        top_level_or_bypass = VALID_SQL.replace(
+            "  AND r.ResumeGuid IS NOT NULL",
+            "  AND r.ResumeGuid IS NOT NULL\n  OR 1 = 1",
+        )
+
+        for sql in (union_bypass, outer_alias_bypass, top_level_or_bypass):
+            with self.subTest(sql=sql):
+                result = run_cli(
+                    {"sql": sql, "params": {}},
+                    None,
+                    "--validate-only",
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(json.loads(result.stderr)["code"], "INVALID_SQL")
+
+    def test_rejects_url_userinfo_and_group_readable_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "connection.json"
+            cases = (
+                ("http://embedded:secret@127.0.0.1:1", 0o600),
+                ("http://127.0.0.1:1", 0o640),
+            )
+            for url, mode in cases:
+                with self.subTest(url=url, mode=oct(mode)):
+                    write_private_config(
+                        config,
+                        {
+                            "url": url,
+                            "database": "RCW_RC_Voodoo_Jobseeker",
+                            "username": "u",
+                            "password": "p",
+                        },
+                        mode,
+                    )
+                    result = run_cli({"sql": VALID_SQL, "params": {}}, config)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(json.loads(result.stderr)["code"], "CONFIG_ERROR")
+
+    def test_rejects_password_column_and_mandatory_predicates_in_comments(self):
+        password_sql = VALID_SQL.replace(
+            "r.JobSeekerName\nFROM",
+            "r.JobSeekerName,\n    base.JobSeekerPassword\nFROM",
+        ).replace(
+            "WHERE r.DelFlag = 0",
+            "LEFT JOIN RCW_RC_Voodoo_Jobseeker.JobSeekerBaseInfo AS base\n"
+            "    ON base.JobSeekerID = r.JobSeekerID\n"
+            "WHERE r.DelFlag = 0",
+        )
+        comment_bypass_sql = VALID_SQL.replace(
+            "WHERE r.DelFlag = 0\n"
+            "  AND r.ResumeState = 2\n"
+            "  AND r.ResumeGuid IS NOT NULL",
+            "WHERE 1 = 1\n"
+            "  /* r.DelFlag = 0\n"
+            "     AND r.ResumeState = 2\n"
+            "     AND r.ResumeGuid IS NOT NULL */",
+        )
+
+        for sql in (password_sql, comment_bypass_sql):
+            with self.subTest(sql=sql):
                 result = run_cli(
                     {"sql": sql, "params": {}},
                     None,
@@ -200,21 +317,20 @@ class ExecutorCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             password = "not-for-logs"
             config = Path(tmp) / "connection.json"
-            config.write_text(
-                json.dumps(
-                    {
-                        "url": f"http://127.0.0.1:{server.server_port}",
-                        "database": "RCW_RC_Voodoo_Jobseeker",
-                        "username": "readonly_test",
-                        "password": password,
-                        "request_timeout_seconds": 10,
-                    }
-                ),
-                encoding="utf-8",
+            write_private_config(
+                config,
+                {
+                    "url": f"http://127.0.0.1:{server.server_port}",
+                    "database": "RCW_RC_Voodoo_Jobseeker",
+                    "username": "readonly_test",
+                    "password": password,
+                    "request_timeout_seconds": 10,
+                },
             )
             sql = VALID_SQL.replace(
-                "WHERE r.DelFlag = 0",
-                "WHERE positionCaseInsensitiveUTF8(ifNull(r.ResumeName, ''), {keyword:String}) > 0\n  AND r.DelFlag = 0",
+                "  AND r.ResumeGuid IS NOT NULL",
+                "  AND r.ResumeGuid IS NOT NULL\n"
+                "  AND positionCaseInsensitiveUTF8(ifNull(r.ResumeName, ''), {keyword:String}) > 0",
             )
             result = run_cli(
                 {
@@ -263,16 +379,14 @@ class ExecutorCliTests(unittest.TestCase):
                 try:
                     with tempfile.TemporaryDirectory() as tmp:
                         config = Path(tmp) / "connection.json"
-                        config.write_text(
-                            json.dumps(
-                                {
-                                    "url": f"http://127.0.0.1:{server.server_port}",
-                                    "database": "RCW_RC_Voodoo_Jobseeker",
-                                    "username": "u",
-                                    "password": "p",
-                                }
-                            ),
-                            encoding="utf-8",
+                        write_private_config(
+                            config,
+                            {
+                                "url": f"http://127.0.0.1:{server.server_port}",
+                                "database": "RCW_RC_Voodoo_Jobseeker",
+                                "username": "u",
+                                "password": "p",
+                            },
                         )
                         result = run_cli({"sql": VALID_SQL, "params": {}}, config)
                 finally:
@@ -299,16 +413,14 @@ class ExecutorCliTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 password = "must-not-leak"
                 config = Path(tmp) / "connection.json"
-                config.write_text(
-                    json.dumps(
-                        {
-                            "url": f"http://127.0.0.1:{server.server_port}",
-                            "database": "RCW_RC_Voodoo_Jobseeker",
-                            "username": "u",
-                            "password": password,
-                        }
-                    ),
-                    encoding="utf-8",
+                write_private_config(
+                    config,
+                    {
+                        "url": f"http://127.0.0.1:{server.server_port}",
+                        "database": "RCW_RC_Voodoo_Jobseeker",
+                        "username": "u",
+                        "password": password,
+                    },
                 )
                 failed = run_cli({"sql": VALID_SQL, "params": {}}, config)
         finally:
@@ -332,16 +444,14 @@ class ExecutorCliTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 password = "must-not-leak"
                 config = Path(tmp) / "connection.json"
-                config.write_text(
-                    json.dumps(
-                        {
-                            "url": f"http://127.0.0.1:{server.server_port}",
-                            "database": "RCW_RC_Voodoo_Jobseeker",
-                            "username": "u",
-                            "password": password,
-                        }
-                    ),
-                    encoding="utf-8",
+                write_private_config(
+                    config,
+                    {
+                        "url": f"http://127.0.0.1:{server.server_port}",
+                        "database": "RCW_RC_Voodoo_Jobseeker",
+                        "username": "u",
+                        "password": password,
+                    },
                 )
                 failed = run_cli({"sql": VALID_SQL, "params": {}}, config)
         finally:

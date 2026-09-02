@@ -46,6 +46,8 @@ Treat natural-language numeric ranges as inclusive unless the user explicitly ex
 
 ## Summary Query Template
 
+Add parameterized filter clauses to the `WHERE` block after the mandatory predicates and before `QUALIFY`.
+
 ```sql
 WITH latest_employment AS
 (
@@ -93,7 +95,6 @@ LEFT JOIN latest_employment AS emp
 WHERE r.DelFlag = 0
   AND r.ResumeState = 2
   AND r.ResumeGuid IS NOT NULL
-  /* Add only parameterized conditions here. */
 QUALIFY row_number() OVER
 (
     PARTITION BY r.ResumeGuid

@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 import re
 import socket
+import stat
 import sys
 from pathlib import Path
 from typing import Any
@@ -17,6 +19,7 @@ from urllib.request import Request, urlopen
 
 
 DEFAULT_LIMIT = 100
+MAX_UINT32 = 2**32 - 1
 DEFAULT_DATABASE = "RCW_RC_Voodoo_Jobseeker"
 DEFAULT_REQUEST_TIMEOUT = 30
 
@@ -47,6 +50,28 @@ CTE_NAME = re.compile(
     re.IGNORECASE,
 )
 PARAMETER_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+SQL_COMMENT = re.compile(r"(?:--|#|/\*|\*/)")
+SENSITIVE_COLUMN = re.compile(r"\bJobSeekerPassword\b", re.IGNORECASE)
+SET_OPERATION = re.compile(r"\b(?:UNION|INTERSECT|EXCEPT)\b", re.IGNORECASE)
+OUTER_RESUME_SOURCE = re.compile(
+    r"^\s+(?:RCW_RC_Voodoo_Jobseeker\.)?JobSeekerResume\s+(?:AS\s+)?r\b",
+    re.IGNORECASE,
+)
+MANDATORY_WHERE_PREFIX = re.compile(
+    r"^\s*r\s*\.\s*DelFlag\s*=\s*0\s+AND\s+"
+    r"r\s*\.\s*ResumeState\s*=\s*2\s+AND\s+"
+    r"r\s*\.\s*ResumeGuid\s+IS\s+NOT\s+NULL"
+    r"(?=\s+AND\b|\s*$)",
+    re.IGNORECASE,
+)
+DEDUPLICATION_QUALIFY = re.compile(
+    r"row_number\s*\(\s*\)\s+OVER\s*\(\s*"
+    r"PARTITION\s+BY\s+r\s*\.\s*ResumeGuid\s+"
+    r"ORDER\s+BY\s+r\s*\.\s*LastRefreshDate\s+DESC\s*,\s*"
+    r"r\s*\.\s*LastEditTime\s+DESC\s*,\s*"
+    r"r\s*\.\s*ResumeID\s+DESC\s*\)\s*=\s*1",
+    re.IGNORECASE,
+)
 
 
 class SearchError(Exception):
@@ -91,9 +116,122 @@ def read_request() -> dict[str, Any]:
 def validate_limit(value: Any) -> int:
     if value is None:
         return DEFAULT_LIMIT
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise error("INVALID_REQUEST", "limit must be a positive integer")
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value <= 0
+        or value > MAX_UINT32
+    ):
+        raise error("INVALID_REQUEST", "limit must be between 1 and 4294967295")
     return value
+
+
+def top_level_words(sql: str) -> list[tuple[str, int, int]]:
+    words: list[tuple[str, int, int]] = []
+    depth = 0
+    quote: str | None = None
+    index = 0
+    while index < len(sql):
+        char = sql[index]
+        if quote is not None:
+            if char == "\\":
+                index += 2
+                continue
+            if char == quote:
+                if index + 1 < len(sql) and sql[index + 1] == quote:
+                    index += 2
+                    continue
+                quote = None
+            index += 1
+            continue
+        if char in {"'", '"', "`"}:
+            quote = char
+            index += 1
+            continue
+        if char == "(":
+            depth += 1
+            index += 1
+            continue
+        if char == ")":
+            depth -= 1
+            if depth < 0:
+                raise error("INVALID_SQL", "SQL parentheses are unbalanced")
+            index += 1
+            continue
+        if (char.isalpha() or char == "_") and depth == 0:
+            start = index
+            index += 1
+            while index < len(sql) and (
+                sql[index].isalnum() or sql[index] == "_"
+            ):
+                index += 1
+            words.append((sql[start:index].upper(), start, index))
+            continue
+        index += 1
+    if quote is not None or depth != 0:
+        raise error("INVALID_SQL", "SQL quotes or parentheses are unbalanced")
+    return words
+
+
+def clause_text(
+    sql: str,
+    words: list[tuple[str, int, int]],
+    clause: str,
+    after: int,
+    boundaries: set[str],
+) -> tuple[str, int]:
+    matches = [item for item in words if item[0] == clause and item[1] > after]
+    if len(matches) != 1:
+        raise error("INVALID_SQL", f"query must contain one outer {clause} clause")
+    _, _start, content_start = matches[0]
+    content_end = min(
+        (start for word, start, _end in words if start > content_start and word in boundaries),
+        default=len(sql),
+    )
+    return sql[content_start:content_end], content_start
+
+
+def validate_outer_query_structure(sql: str) -> None:
+    if SET_OPERATION.search(sql):
+        raise error("INVALID_SQL", "set operations are not allowed")
+    words = top_level_words(sql)
+    selects = [item for item in words if item[0] == "SELECT"]
+    if len(selects) != 1:
+        raise error("INVALID_SQL", "query must contain one outer SELECT")
+    _, select_start, _select_end = selects[0]
+
+    from_text, from_start = clause_text(
+        sql,
+        words,
+        "FROM",
+        select_start,
+        {"WHERE", "PREWHERE", "GROUP", "HAVING", "QUALIFY", "ORDER", "LIMIT"},
+    )
+    if not OUTER_RESUME_SOURCE.match(from_text):
+        raise error("INVALID_SQL", "outer query must select JobSeekerResume AS r")
+
+    where_text, where_start = clause_text(
+        sql,
+        words,
+        "WHERE",
+        from_start,
+        {"GROUP", "HAVING", "QUALIFY", "ORDER", "LIMIT"},
+    )
+    collapsed_where = " ".join(where_text.split())
+    if not MANDATORY_WHERE_PREFIX.match(collapsed_where):
+        raise error("INVALID_SQL", "outer WHERE must start with mandatory resume predicates")
+    if any(word == "OR" for word, _start, _end in top_level_words(where_text)):
+        raise error("INVALID_SQL", "outer WHERE conditions must be joined with AND")
+
+    qualify_text, _qualify_start = clause_text(
+        sql,
+        words,
+        "QUALIFY",
+        where_start,
+        {"ORDER", "LIMIT"},
+    )
+    if not DEDUPLICATION_QUALIFY.fullmatch(" ".join(qualify_text.split())):
+        raise error("INVALID_SQL", "query must deduplicate ResumeGuid with QUALIFY")
 
 
 def validate_params(value: Any) -> dict[str, Any]:
@@ -119,11 +257,17 @@ def validate_sql(value: Any) -> str:
     sql = value.strip()
     if ";" in sql:
         raise error("INVALID_SQL", "multiple statements and semicolons are not allowed")
+    if SQL_COMMENT.search(sql):
+        raise error("INVALID_SQL", "SQL comments are not allowed")
     collapsed = " ".join(sql.split())
     if not re.match(r"^(?:SELECT\b|WITH\b.*\bSELECT\b)", collapsed, re.IGNORECASE):
         raise error("INVALID_SQL", "only SELECT or WITH ... SELECT is allowed")
     if FORBIDDEN_SQL.search(collapsed):
         raise error("INVALID_SQL", "mutating, DDL, system, and privilege SQL is forbidden")
+    if SENSITIVE_COLUMN.search(collapsed):
+        raise error("INVALID_SQL", "sensitive account columns are forbidden")
+
+    validate_outer_query_structure(sql)
 
     tables = TABLE_REFERENCE.findall(collapsed)
     cte_names = set(CTE_NAME.findall(collapsed))
@@ -160,6 +304,7 @@ def normalize_request(value: dict[str, Any]) -> tuple[str, dict[str, Any], int]:
 
 def load_config(path: Path) -> dict[str, Any]:
     try:
+        file_stat = path.stat()
         raw = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
         raise error("CONFIG_ERROR", "Private connection configuration was not found") from exc
@@ -167,6 +312,11 @@ def load_config(path: Path) -> dict[str, Any]:
         raise error("CONFIG_ERROR", "Private connection configuration is invalid") from exc
     if not isinstance(raw, dict):
         raise error("CONFIG_ERROR", "Private connection configuration must be an object")
+    if os.name == "posix":
+        if stat.S_IMODE(file_stat.st_mode) & 0o077:
+            raise error("CONFIG_ERROR", "Private connection configuration must use mode 0600")
+        if hasattr(os, "getuid") and file_stat.st_uid != os.getuid():
+            raise error("CONFIG_ERROR", "Private connection configuration must be user-owned")
     for key in ("url", "username", "password"):
         if not isinstance(raw.get(key), str) or not raw[key]:
             raise error("CONFIG_ERROR", f"Connection setting {key} is required")
@@ -174,6 +324,8 @@ def load_config(path: Path) -> dict[str, Any]:
     parsed = urlparse(raw["url"])
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise error("CONFIG_ERROR", "Connection URL must use http or https")
+    if parsed.username is not None or parsed.password is not None:
+        raise error("CONFIG_ERROR", "Connection URL cannot contain credentials")
     if parsed.query or parsed.fragment:
         raise error("CONFIG_ERROR", "Connection URL cannot contain a query or fragment")
 

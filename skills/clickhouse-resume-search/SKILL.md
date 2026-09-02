@@ -1,6 +1,6 @@
 ---
 name: clickhouse-resume-search
-description: Use when a user asks in Chinese or English to search, filter, screen, find, or count resumes, candidates, job seekers, employment histories, or project experience in the configured ClickHouse recruitment database.
+description: Use when a user asks in Chinese or English to search, filter, screen, or find resumes, candidates, job seekers, employment histories, or project experience in the configured ClickHouse recruitment database.
 ---
 
 # ClickHouse Resume Search
@@ -13,7 +13,7 @@ Translate natural-language criteria into one parameterized, read-only ClickHouse
 
 1. Read `references/schema.md` before generating SQL.
 2. Extract filters, free-text keywords, requested count, and requested order.
-3. Use 100 rows when no count is specified. Honor every explicit positive integer without adding an arbitrary cap.
+3. Use 100 rows when no count is specified. Honor every explicit positive integer through the `UInt32` maximum of 4294967295; report the technical type limit for a larger request.
 4. Treat multiple free-text keywords as AND: every keyword must match, while each keyword may match any documented search field. Match each multi-character keyword phrase as one intact substring unless the user explicitly asks for tokenization.
 5. Ask one focused question when an enum label cannot be mapped from verified references. Never guess an integer code.
 6. Start from the summary template in `references/schema.md`. Keep all three mandatory predicates:
@@ -24,7 +24,9 @@ AND r.ResumeState = 2
 AND r.ResumeGuid IS NOT NULL
 ```
 
-7. Bind every user value with ClickHouse typed placeholders such as `{keyword_0:String}`. Never place user text directly in SQL.
+Add filter conditions after the mandatory predicates, join every outer condition with `AND`, and keep any `OR` alternatives inside parentheses. Preserve the template's exact `QUALIFY row_number()` clause so `ResumeGuid` remains unique.
+
+7. Bind every user value with ClickHouse typed placeholders such as `{keyword_0:String}`. Never place user text directly in SQL, and never add SQL comments.
 8. Keep `LIMIT {limit:UInt32}` as the final clause. Use the default order unless the user explicitly requests another order:
 
 ```sql
@@ -47,7 +49,7 @@ Run from the skill directory:
 python3 scripts/search_resumes.py
 ```
 
-The executor permits only HTTP GET with ClickHouse `readonly=1`, one `SELECT`/`WITH ... SELECT`, approved tables, mandatory predicates, typed parameters, and a positive limit.
+The executor permits only HTTP GET with ClickHouse `readonly=1`, one outer `SELECT`, approved tables, mandatory predicates, typed parameters, the required `ResumeGuid` deduplication clause, and a positive `UInt32` limit.
 
 ## Results
 
