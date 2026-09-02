@@ -79,7 +79,7 @@ Before transmission, the executor must:
 - Reject semicolons and mutation, DDL, privilege, system, attachment, or optimization statements.
 - Restrict table references to the approved resume tables.
 - Require a positive result limit.
-- Set ClickHouse `readonly=1`, `max_execution_time`, and response format settings.
+- Set ClickHouse `readonly=1` and the response format, and enforce a client-side request timeout because this read-only user cannot change server session settings.
 - Avoid logging credentials or placing them in error messages.
 
 The read-only database account and ClickHouse HTTP GET restrictions provide independent server-side protection in addition to client validation.

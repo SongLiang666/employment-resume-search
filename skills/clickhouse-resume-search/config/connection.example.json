@@ -1,0 +1,7 @@
+{
+  "url": "http://clickhouse.example.internal:8123",
+  "database": "RCW_RC_Voodoo_Jobseeker",
+  "username": "readonly_user",
+  "password": "REPLACE_LOCALLY",
+  "request_timeout_seconds": 30
+}

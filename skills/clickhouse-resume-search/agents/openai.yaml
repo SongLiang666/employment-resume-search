@@ -1,0 +1,4 @@
+interface:
+  display_name: "ClickHouse 简历搜索"
+  short_description: "根据中文条件安全检索 ClickHouse 人才简历信息"
+  default_prompt: "Use $clickhouse-resume-search to find resumes matching my Chinese search criteria."
