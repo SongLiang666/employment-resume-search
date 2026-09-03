@@ -7,14 +7,21 @@ description: Use when a user asks in Chinese or English to search, filter, scree
 
 ## Overview
 
-Translate natural-language criteria into one parameterized, read-only ClickHouse query and return one concise summary per resume. Always protect the mandatory resume scope and return `ResumeGuid`.
+Translate natural-language criteria into parameterized, read-only ClickHouse queries and return one concise summary per resume. Always protect the mandatory resume scope and return `ResumeGuid`.
 
 ## Workflow
 
 1. Read `references/schema.md` before generating SQL.
 2. Extract filters, free-text keywords, requested count, and requested order.
 3. Use 100 rows when no count is specified. Honor every explicit positive integer through the `UInt32` maximum of 4294967295; report the technical type limit for a larger request.
-4. Treat multiple free-text keywords as AND: every keyword must match, while each keyword may match any documented search field. Match each multi-character keyword phrase as one intact substring unless the user explicitly asks for tokenization.
+4. When free-text keywords are present and the user did not explicitly restrict the fields, search the priority tiers in this exact order:
+   1. Expected position name
+   2. Current position
+   3. Employment history
+   4. Project experience
+   5. Resume name or school
+
+   Within the active tier, require every keyword (`AND` between keyword clauses), while fields belonging to that tier are alternatives (`OR` inside parentheses). Match each multi-character keyword phrase as one intact substring unless the user explicitly asks for tokenization. Send one request per tier using the same filters, parameters, order, and limit. If a tier returns one or more rows, return only that tier's rows and stop, even when fewer rows than requested are available. Send the next tier only when the current tier returns zero rows; never mix lower-priority matches into a non-empty higher-priority result set. With no free-text keyword, send one base query. If the user explicitly names a tier or field, honor that narrower scope.
 5. Ask one focused question when an enum label cannot be mapped from verified references. Never guess an integer code.
 6. Start from the summary template in `references/schema.md`. Keep all three mandatory predicates:
 
@@ -33,7 +40,7 @@ Add filter conditions after the mandatory predicates, join every outer condition
 ORDER BY r.LastRefreshDate DESC, r.LastEditTime DESC
 ```
 
-9. Send one JSON request on stdin to `scripts/search_resumes.py`:
+9. For a keyword search, send one JSON request on stdin to `scripts/search_resumes.py` for each priority tier, in order, and inspect the returned `count` before deciding whether to continue. For a non-keyword search, send one request:
 
 ```json
 {

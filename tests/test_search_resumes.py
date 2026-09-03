@@ -154,6 +154,57 @@ class ExecutorCliTests(unittest.TestCase):
         skill = SKILL.read_text(encoding="utf-8")
         self.assertIn("intact substring", skill.lower())
 
+    def test_skill_documents_priority_tiers_in_order(self):
+        skill = SKILL.read_text(encoding="utf-8").lower()
+        skill = skill[skill.index("search the priority tiers"):]
+        markers = (
+            "expected position name",
+            "current position",
+            "employment history",
+            "project experience",
+            "resume name or school",
+        )
+        positions = [skill.index(marker) for marker in markers]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("only when the current tier returns zero rows", skill)
+        self.assertIn("never mix lower-priority matches", skill)
+
+    def test_skill_does_not_default_to_broad_all_field_keyword_matching(self):
+        skill = SKILL.read_text(encoding="utf-8").lower()
+        self.assertNotIn("each keyword may match any documented search field", skill)
+        self.assertIn("one request per tier", skill)
+
+    def test_reference_documents_priority_tier_predicates(self):
+        reference = SCHEMA.read_text(encoding="utf-8").lower()
+        self.assertIn("## Priority Keyword Tiers".lower(), reference)
+        for marker in (
+            "1. Expected position name",
+            "2. Current position",
+            "3. Employment history",
+            "4. Project experience",
+            "5. Resume name or school",
+        ):
+            self.assertIn(marker.lower(), reference)
+        self.assertNotIn("## Broad Keyword Clause".lower(), reference)
+
+    def test_reference_priority_predicates_pass_executor_validation(self):
+        reference = SCHEMA.read_text(encoding="utf-8")
+        section = reference.split("## Priority Keyword Tiers", 1)[1]
+        section = section.split("## Enum Rule", 1)[0]
+        snippets = re.findall(r"```sql\n(.*?)\n```", section, re.DOTALL)
+        self.assertEqual(len(snippets), 5)
+        for snippet in snippets:
+            sql = VALID_SQL.replace(
+                "QUALIFY row_number()", snippet + "\nQUALIFY row_number()"
+            )
+            with self.subTest(snippet=snippet[:60]):
+                result = run_cli(
+                    {"sql": sql, "params": {}, "limit": 1},
+                    None,
+                    "--validate-only",
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_skill_documents_executor_structure_constraints(self):
         skill = SKILL.read_text(encoding="utf-8")
         self.assertIn("after the mandatory predicates", skill.lower())

@@ -46,7 +46,7 @@ Use `LIMIT 100` unless the user explicitly requests another positive result coun
 
 Translate clearly named numeric, date, and text conditions directly. Use ClickHouse typed query parameters for all user-provided values. Never interpolate user text into SQL literals.
 
-For an unqualified free-text keyword, search across relevant fields in the resume, extension, employment, and project tables. Multiple keywords must all match; each keyword may match any eligible field. Use `IN` subqueries or joins that preserve one output row per resume.
+For an unqualified free-text keyword, search by priority tiers in this order: expected position name, current position, employment history, project experience, then resume name or school. Run one query per tier with the same filters and limit. Within a tier, all keywords must match that tier, with the tier's fields as alternatives. Stop at the first tier returning one or more rows, even when fewer rows than requested are available; query the next tier only after zero rows and never mix lower-tier rows into a non-empty higher-tier response. Use `IN` subqueries or joins that preserve one output row per resume.
 
 Do not guess undocumented enum mappings such as education codes. If a requested natural-language value cannot be mapped from verified schema or reference data, explain the ambiguity and ask for the numeric code or an approved mapping before querying.
 
@@ -117,7 +117,7 @@ Use test-first development for the executor. Cover:
 - Mandatory resume predicates and default ordering.
 - `ResumeGuid` presence.
 - Parameter binding and special-character handling.
-- Broad keyword conditions without duplicate resumes.
+- Priority-tier keyword conditions, stop-on-first-non-empty behavior, and no duplicate resumes.
 - Rejection of multi-statement and non-read-only SQL.
 - Missing or malformed private configuration.
 - HTTP, authentication, timeout, and ClickHouse error handling without credential leakage.

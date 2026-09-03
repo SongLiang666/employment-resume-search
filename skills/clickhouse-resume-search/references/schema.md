@@ -104,42 +104,81 @@ ORDER BY r.LastRefreshDate DESC, r.LastEditTime DESC
 LIMIT {limit:UInt32}
 ```
 
-## Broad Keyword Clause
+## Priority Keyword Tiers
 
-For each keyword parameter, add one parenthesized clause joined to other keyword clauses with `AND`. This example is abbreviated; include all relevant strings listed above when broad search is requested.
+Do not use a single full-text `OR` across all resume, career, employment, project, and school fields. For an unqualified keyword search, run the summary query once per tier in this exact order. Add the selected tier predicate after the mandatory predicates and before `QUALIFY`, then inspect the executor response:
+
+1. **Expected position name**: `ext.ExpectCareerName1`, `ext.ExpectCareerName2`, `ext.ExpectCareerName3`.
+2. **Current position**: `ext.PresentCareerName`.
+3. **Employment history**: employment rows (`ExperienceType = 2`, visible rows only) and `ExperienceText1` through `ExperienceText9`, `ExperienceLingText`, `EnterpriseIntroduction`, `JobDescription`, `JobPerformance`, `HigherUp`, and `CustomKeywords`.
+4. **Project experience**: `ProjectName` and `ProjectDescription`.
+5. **Resume name or school**: `r.ResumeName` and `r.HighestEducationSchool`.
+
+Each keyword must match at least one field in the active tier. Therefore, join keyword clauses with `AND`, and keep that tier's field alternatives inside one parenthesized `OR` expression. If the response `count` is greater than zero, return only that response and stop, even if it contains fewer rows than the requested limit. Query the next tier only after a zero-row response. Never supplement a non-empty higher-priority response with lower-tier rows.
+
+Use these parameterized predicates as templates. For multiple keywords, repeat the relevant block with `{keyword_1:String}`, `{keyword_2:String}`, and so on, joining the repeated blocks with `AND`.
+
+### 1. Expected Position Name
+
+```sql
+AND
+(
+    positionCaseInsensitiveUTF8(ifNull(ext.ExpectCareerName1, ''), {keyword_0:String}) > 0
+    OR positionCaseInsensitiveUTF8(ifNull(ext.ExpectCareerName2, ''), {keyword_0:String}) > 0
+    OR positionCaseInsensitiveUTF8(ifNull(ext.ExpectCareerName3, ''), {keyword_0:String}) > 0
+)
+```
+
+### 2. Current Position
+
+```sql
+AND positionCaseInsensitiveUTF8(ifNull(ext.PresentCareerName, ''), {keyword_0:String}) > 0
+```
+
+### 3. Employment History
+
+```sql
+AND r.ResumeID IN
+(
+    SELECT ResumeID
+    FROM RCW_RC_Voodoo_Jobseeker.JobSeekerResumeExperience
+    WHERE ExperienceType = 2
+      AND ifNull(HideIt, 0) = 0
+      AND arrayExists(
+          value -> positionCaseInsensitiveUTF8(value, {keyword_0:String}) > 0,
+          [
+              ifNull(ExperienceText1, ''), ifNull(ExperienceText2, ''),
+              ifNull(ExperienceText3, ''), ifNull(ExperienceText4, ''),
+              ifNull(ExperienceText5, ''), ifNull(ExperienceText6, ''),
+              ifNull(ExperienceText7, ''), ifNull(ExperienceText8, ''),
+              ifNull(ExperienceText9, ''), ifNull(ExperienceLingText, ''),
+              ifNull(EnterpriseIntroduction, ''), ifNull(JobDescription, ''),
+              ifNull(JobPerformance, ''), ifNull(HigherUp, ''),
+              ifNull(CustomKeywords, '')
+          ]
+      )
+)
+```
+
+### 4. Project Experience
+
+```sql
+AND r.ResumeID IN
+(
+    SELECT ResumeID
+    FROM RCW_RC_Voodoo_Jobseeker.JobSeekerResumeProjectExperience
+    WHERE positionCaseInsensitiveUTF8(ifNull(ProjectName, ''), {keyword_0:String}) > 0
+       OR positionCaseInsensitiveUTF8(ifNull(ProjectDescription, ''), {keyword_0:String}) > 0
+)
+```
+
+### 5. Resume Name Or School
 
 ```sql
 AND
 (
     positionCaseInsensitiveUTF8(ifNull(r.ResumeName, ''), {keyword_0:String}) > 0
     OR positionCaseInsensitiveUTF8(ifNull(r.HighestEducationSchool, ''), {keyword_0:String}) > 0
-    OR positionCaseInsensitiveUTF8(ifNull(ext.HighestEducationSpecialtyName, ''), {keyword_0:String}) > 0
-    OR positionCaseInsensitiveUTF8(ifNull(ext.PresentCareerName, ''), {keyword_0:String}) > 0
-    OR positionCaseInsensitiveUTF8(ifNull(ext.ExpectCareerName1, ''), {keyword_0:String}) > 0
-    OR r.ResumeID IN
-    (
-        SELECT ResumeID
-        FROM RCW_RC_Voodoo_Jobseeker.JobSeekerResumeExperience
-        WHERE arrayExists(
-            value -> positionCaseInsensitiveUTF8(value, {keyword_0:String}) > 0,
-            [
-                ifNull(ExperienceText1, ''), ifNull(ExperienceText2, ''),
-                ifNull(ExperienceText3, ''), ifNull(ExperienceText4, ''),
-                ifNull(ExperienceText5, ''), ifNull(ExperienceText6, ''),
-                ifNull(ExperienceText7, ''), ifNull(ExperienceText8, ''),
-                ifNull(ExperienceText9, ''), ifNull(ExperienceLingText, ''),
-                ifNull(EnterpriseIntroduction, ''), ifNull(JobDescription, ''),
-                ifNull(JobPerformance, ''), ifNull(CustomKeywords, '')
-            ]
-        )
-    )
-    OR r.ResumeID IN
-    (
-        SELECT ResumeID
-        FROM RCW_RC_Voodoo_Jobseeker.JobSeekerResumeProjectExperience
-        WHERE positionCaseInsensitiveUTF8(ProjectName, {keyword_0:String}) > 0
-           OR positionCaseInsensitiveUTF8(ifNull(ProjectDescription, ''), {keyword_0:String}) > 0
-    )
 )
 ```
 
