@@ -22,6 +22,9 @@ DEFAULT_LIMIT = 100
 MAX_UINT32 = 2**32 - 1
 DEFAULT_DATABASE = "RCW_RC_Voodoo_Jobseeker"
 DEFAULT_REQUEST_TIMEOUT = 30
+DEFAULT_CONFIG_PATH = (
+    Path(__file__).resolve().parents[1] / "config" / "connection.json"
+)
 
 ALLOWED_TABLES = {
     "RCW_RC_Voodoo_Jobseeker.JobSeekerBaseInfo",
@@ -92,8 +95,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--config",
         type=Path,
-        default=Path(__file__).resolve().parents[1] / "config" / "connection.json",
-        help="Private connection JSON file",
+        default=DEFAULT_CONFIG_PATH,
+        help="Connection JSON file (uses the bundled configuration by default)",
     )
     parser.add_argument(
         "--validate-only",
@@ -313,10 +316,21 @@ def load_config(path: Path) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise error("CONFIG_ERROR", "Private connection configuration must be an object")
     if os.name == "posix":
-        if stat.S_IMODE(file_stat.st_mode) & 0o077:
-            raise error("CONFIG_ERROR", "Private connection configuration must use mode 0600")
         if hasattr(os, "getuid") and file_stat.st_uid != os.getuid():
             raise error("CONFIG_ERROR", "Private connection configuration must be user-owned")
+        if stat.S_IMODE(file_stat.st_mode) & 0o077:
+            if path != DEFAULT_CONFIG_PATH or path.is_symlink():
+                raise error("CONFIG_ERROR", "Private connection configuration must use mode 0600")
+            try:
+                path.chmod(0o600)
+                file_stat = path.stat()
+            except OSError as exc:
+                raise error(
+                    "CONFIG_ERROR",
+                    "Bundled connection configuration permissions could not be secured",
+                ) from exc
+            if stat.S_IMODE(file_stat.st_mode) & 0o077:
+                raise error("CONFIG_ERROR", "Private connection configuration must use mode 0600")
     for key in ("url", "username", "password"):
         if not isinstance(raw.get(key), str) or not raw[key]:
             raise error("CONFIG_ERROR", f"Connection setting {key} is required")

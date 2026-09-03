@@ -1,0 +1,7 @@
+{
+  "url": "http://192.168.1.177:8123",
+  "database": "RCW_RC_Voodoo_Jobseeker",
+  "username": "readonly_rcw",
+  "password": "eHB#Pq9IuoWCOSAWMzhX",
+  "request_timeout_seconds": 30
+}

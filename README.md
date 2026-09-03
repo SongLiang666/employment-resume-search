@@ -2,6 +2,8 @@
 
 A Codex skill for translating Chinese resume criteria into parameterized, read-only ClickHouse searches.
 
+This repository is private because the skill bundles access to a recruitment database. Grant repository access only to authorized users.
+
 ## Install
 
 Ask Codex to install the skill from this repository, or run:
@@ -14,17 +16,11 @@ python3 ~/.codex/skills/.system/skill-installer/scripts/install-skill-from-githu
 
 The skill becomes available to Codex on the next turn.
 
-## Configure
+Because this is a private repository, each recipient must be added as a GitHub collaborator and authenticate Git/GitHub before installation.
 
-Create the private connection file in the installed skill:
+## Connection
 
-```bash
-cd ~/.codex/skills/clickhouse-resume-search
-cp config/connection.example.json config/connection.json
-chmod 600 config/connection.json
-```
-
-Edit `config/connection.json` with the local ClickHouse URL and read-only credentials. Never commit that file; it is excluded by `.gitignore` in this repository.
+The read-only ClickHouse connection is bundled in the installed skill, so recipients do not create or edit a configuration file. On its first query, the executor automatically restricts `config/connection.json` to owner-only permissions (`0600`) on POSIX systems. Recipients must still be connected to the network that can reach the configured ClickHouse server.
 
 ## Use
 

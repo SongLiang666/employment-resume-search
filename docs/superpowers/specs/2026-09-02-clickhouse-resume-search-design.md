@@ -2,7 +2,7 @@
 
 ## Goal
 
-Create a distributable Codex skill that converts Chinese natural-language resume criteria into safe ClickHouse queries and returns one summary row per matching resume. Install the working copy at `~/.codex/skills/clickhouse-resume-search` and publish the reusable skill through GitHub without publishing credentials.
+Create a distributable Codex skill that converts Chinese natural-language resume criteria into safe ClickHouse queries and returns one summary row per matching resume. Install the working copy at `~/.codex/skills/clickhouse-resume-search` and distribute the reusable skill through a private GitHub repository to authorized users.
 
 ## Repository Layout
 
@@ -15,10 +15,12 @@ employment-resume-search/
     ├── agents/openai.yaml
     ├── scripts/search_resumes.py
     ├── references/schema.md
-    └── config/connection.example.json
+    └── config/
+        ├── connection.json
+        └── connection.example.json
 ```
 
-The locally installed skill additionally contains `config/connection.json`. Git must ignore this file. Store the real ClickHouse URL, username, and password only in that local file and set its permissions to `0600`.
+The private repository bundles `config/connection.json` so authorized recipients do not need a configuration step. On first execution, the script restricts that file to `0600` on POSIX systems. Keep the repository private and limit collaborator access because every collaborator can read the shared credentials.
 
 ## Data Sources
 
@@ -71,7 +73,7 @@ Do not flatten multiple employment or project rows into duplicate resume results
 
 ### Query Executor
 
-`scripts/search_resumes.py` uses the ClickHouse HTTP interface and Python standard-library networking so installation does not require third-party packages. It reads the private connection configuration, sends a single parameterized query, parses `JSONEachRow`, and emits structured JSON.
+`scripts/search_resumes.py` uses the ClickHouse HTTP interface and Python standard-library networking so installation does not require third-party packages. It reads the bundled private connection configuration, sends a single parameterized query, parses `JSONEachRow`, and emits structured JSON.
 
 Before transmission, the executor must:
 
@@ -86,7 +88,7 @@ The read-only database account and ClickHouse HTTP GET restrictions provide inde
 
 ### Connection Configuration
 
-The public `connection.example.json` contains placeholders only. The local `connection.json` contains the actual connection values requested by the owner. The skill must fail with a concise configuration error if the private file is absent or malformed.
+The private repository includes `connection.json` with the shared read-only connection and `connection.example.json` as a format reference. The skill must fail with a concise configuration error if the bundled file is absent or malformed. Custom configuration paths remain subject to owner-only `0600` permissions.
 
 ## Data Flow
 
@@ -103,11 +105,11 @@ The public `connection.example.json` contains placeholders only. The local `conn
 - Never retry authentication or invalid-query failures automatically.
 - Use a bounded connection and execution timeout.
 - For output too large for chat, preserve all requested rows in a JSONL artifact rather than silently truncating them.
-- Never include the password in command output, exceptions, logs, committed files, or generated artifacts.
+- Never include the password in command output, exceptions, logs, generated artifacts, or chat responses.
 
 ## Distribution
 
-Publish the skill at `skills/clickhouse-resume-search` so Codex can install it from the GitHub repository path. Keep credentials out of Git history. Recipients create their own `connection.json`; shared credentials, if intentionally reused, must be transferred outside GitHub.
+Distribute the skill at `skills/clickhouse-resume-search` from the private GitHub repository. Add only authorized recipients as collaborators. The bundled shared credentials remain in private Git history and must be rotated if repository access is granted incorrectly or a collaborator no longer requires access.
 
 ## Verification
 

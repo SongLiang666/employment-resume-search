@@ -1,6 +1,7 @@
 import base64
 import json
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -15,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "skills" / "clickhouse-resume-search" / "scripts" / "search_resumes.py"
 SCHEMA = ROOT / "skills" / "clickhouse-resume-search" / "references" / "schema.md"
 SKILL = ROOT / "skills" / "clickhouse-resume-search" / "SKILL.md"
+CONFIG = ROOT / "skills" / "clickhouse-resume-search" / "config" / "connection.json"
 
 VALID_SQL = """
 SELECT
@@ -78,6 +80,18 @@ class ExecutorPresenceTests(unittest.TestCase):
         result = run_cli(None, None, "--help")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("ClickHouse resume search", result.stdout)
+
+    def test_repository_bundles_connection_configuration(self):
+        self.assertTrue(CONFIG.is_file())
+        config = json.loads(CONFIG.read_text(encoding="utf-8"))
+        self.assertTrue(config["url"].startswith("http"))
+        self.assertTrue(config["username"])
+        self.assertTrue(config["password"])
+        ignored = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+        self.assertNotIn(
+            "skills/clickhouse-resume-search/config/connection.json",
+            ignored,
+        )
 
 
 @unittest.skipUnless(SCRIPT.is_file(), "executor not implemented yet")
@@ -412,6 +426,59 @@ LIMIT {{limit:UInt32}}"""
         self.assertTrue(query["query"][0].endswith("FORMAT JSONEachRow"))
         expected_auth = base64.b64encode(b"readonly_test:not-for-logs").decode("ascii")
         self.assertEqual(request["authorization"], f"Basic {expected_auth}")
+
+    def test_bundled_default_config_is_auto_hardened_and_used(self):
+        rows = [
+            {
+                "ResumeGuid": "264081e3-053a-4a54-9868-b9fd8d5ca4b2",
+                "ResumeID": 7,
+            }
+        ]
+        FakeClickHouseHandler.response_body = "\n".join(json.dumps(row) for row in rows)
+        server = ThreadingHTTPServer(("127.0.0.1", 0), FakeClickHouseHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_dir = Path(tmp) / "clickhouse-resume-search"
+            scripts_dir = skill_dir / "scripts"
+            config_dir = skill_dir / "config"
+            scripts_dir.mkdir(parents=True)
+            config_dir.mkdir()
+            copied_script = scripts_dir / SCRIPT.name
+            shutil.copy2(SCRIPT, copied_script)
+            bundled_config = config_dir / "connection.json"
+            write_private_config(
+                bundled_config,
+                {
+                    "url": f"http://127.0.0.1:{server.server_port}",
+                    "database": "RCW_RC_Voodoo_Jobseeker",
+                    "username": "bundled_user",
+                    "password": "bundled_password",
+                },
+                mode=0o644,
+            )
+            result = subprocess.run(
+                [sys.executable, str(copied_script)],
+                input=json.dumps({"sql": VALID_SQL, "params": {}, "limit": 1}),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(bundled_config.stat().st_mode & 0o777, 0o600)
+
+        self.assertEqual(len(FakeClickHouseHandler.captured), 1)
+        expected_auth = base64.b64encode(
+            b"bundled_user:bundled_password"
+        ).decode("ascii")
+        self.assertEqual(
+            FakeClickHouseHandler.captured[0]["authorization"],
+            f"Basic {expected_auth}",
+        )
 
     def test_rejects_null_or_duplicate_resume_guid(self):
         bad_responses = (
